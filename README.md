@@ -4,7 +4,10 @@
 
 **Gemini Notebook Assistant** — расширение для Google Chrome, которое расширяет возможности [Google Gemini Notebook](https://notebooklm.google.com). Оно позволяет быстро добавлять источники из браузера, парсить YouTube-комментарии, массово управлять источниками и синхронизировать файлы Google Drive — всё без необходимости вручную копировать ссылки.
 
-![Chrome](https://img.shields.io/badge/Chrome-MV3-green) ![Version](https://img.shields.io/badge/version-3.3.7-blue) ![License](https://img.shields.io/badge/license-MIT-yellow)
+![Chrome](https://img.shields.io/badge/Chrome-MV3-green) ![Version](https://img.shields.io/badge/version-3.3.9-blue) ![License](https://img.shields.io/badge/license-MIT-yellow)
+
+Проверка и разработка: [TESTING.md](TESTING.md). Исправления и результаты проверки: [TEST_REPORT.md](TEST_REPORT.md).
+Подготовка и обновление GitHub: [GITHUB_UPDATE.md](GITHUB_UPDATE.md). Описание выпуска: [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ---
 
@@ -305,6 +308,7 @@ notebooklm-assistant/
 | `debugger` | Захват страницы как PDF |
 | `notifications` | Chrome-уведомления о действиях |
 | `alarms` | Для отказоустойчивой обработки очереди (crash-safe queue) |
+| `offscreen` | Разбор RSS, Atom и Sitemap через XML DOM в скрытом документе расширения |
 | `host_permissions`: `https://notebooklm.google.com/*` | Доступ к API Gemini Notebook |
 | `host_permissions`: `https://www.youtube.com/*` | Парсинг комментариев YouTube |
 | `host_permissions`: `https://accounts.google.com/*` | Обнаружение Google-аккаунтов |
@@ -369,7 +373,10 @@ MIT License. Свободное использование, модификаци
 
 **Gemini Notebook Assistant** is a Google Chrome extension that supercharges [Google Gemini Notebook](https://notebooklm.google.com). It lets you quickly add sources from your browser, parse YouTube comments, bulk-manage sources, and sync Google Drive files — all without manually copying links.
 
-![Chrome](https://img.shields.io/badge/Chrome-MV3-green) ![Version](https://img.shields.io/badge/version-3.3.7-blue) ![License](https://img.shields.io/badge/license-MIT-yellow)
+![Chrome](https://img.shields.io/badge/Chrome-MV3-green) ![Version](https://img.shields.io/badge/version-3.3.9-blue) ![License](https://img.shields.io/badge/license-MIT-yellow)
+
+Development checks: [TESTING.md](TESTING.md). Fixes and verification results: [TEST_REPORT.md](TEST_REPORT.md).
+Packaging and GitHub updates: [GITHUB_UPDATE.md](GITHUB_UPDATE.md). Release description: [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ---
 
@@ -670,6 +677,7 @@ PDF generation uses the `chrome.debugger` API with the Chrome DevTools Protocol 
 | `debugger` | Capture pages as PDF |
 | `notifications` | Chrome notifications for actions |
 | `alarms` | For crash-safe queue processing |
+| `offscreen` | Parse RSS, Atom and Sitemap XML in an extension-owned DOM document |
 | `host_permissions`: `https://notebooklm.google.com/*` | Access to the Gemini Notebook API |
 | `host_permissions`: `https://www.youtube.com/*` | YouTube comment parsing |
 | `host_permissions`: `https://accounts.google.com/*` | Google account detection |
@@ -731,6 +739,26 @@ MIT License. Free to use, modify, and distribute.
 
 ## 📋 Changelog
 
+### v3.3.9
+
+- Последний выбор аккаунта имеет приоритет над запоздавшими ответами авторизации; неудачное переключение восстанавливает подтверждённый аккаунт.
+- Перед отправкой элемента очереди сохраняется снимок существующих источников. При потере ответа результат сверяется с блокнотом; неподтверждённый запрос автоматически не отправляется повторно.
+- Новая очередь после отмены предыдущей продолжает работу после завершения текущего RPC, без ожидания alarm watchdog.
+- Массовый импорт возвращает статусы каждого URL, сохраняет историю успешных добавлений и позволяет повторять только неудачные и ещё не отправленные элементы.
+- Добавлены регрессионные проверки этих сценариев, включая задержанные ответы, перезапуск worker и сохранение состояния в резервной копии.
+
+### v3.3.8
+
+- Исправлены обработка RPC-ошибок и единый формат сообщений между интерфейсами и service worker.
+- Изолированы токены аккаунтов; выбранные блокноты сохраняются отдельно для каждого аккаунта.
+- Очередь сохраняется между перезапусками, использует стабильные ID, реальные статусы и три попытки обработки.
+- Исправлены PDF-команды, актуальный формат регистрации PDF и определение актуальности Google Drive.
+- Исправлены сортировка, лимиты, отмена и постраничная загрузка ответов YouTube.
+- Реализован XML-разбор RSS/Atom/Sitemap и индексов Sitemap через offscreen-документ.
+- Исправлены сопоставление источников при удалении, восстановление настроек, локализация и импорт вкладок.
+- Добавлены автоматические проверки и браузерные тесты. Результаты сквозных проверок Google описаны в [TEST_REPORT.md](TEST_REPORT.md).
+
+При установке этой версии перезагрузите расширение и открытые страницы Gemini Notebook.
 
 ### v3.3.7
 

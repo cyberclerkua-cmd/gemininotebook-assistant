@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "__MSG_extName__",
   "short_name": "Gemini Notebook Assistant",
-  "version": "3.3.7",
+  "version": "3.3.9",
   "description": "__MSG_extDescription__",
   "default_locale": "en",
   "minimum_chrome_version": "116",
@@ -15,7 +15,8 @@
     "contextMenus",
     "debugger",
     "notifications",
-    "alarms"
+    "alarms",
+    "offscreen"
   ],
 
   "host_permissions": [
@@ -69,7 +70,7 @@
         "https://notebook.google.com/*",
         "https://notebooklm.google.com/*"
       ],
-      "js": ["content/notebooklm.js"],
+      "js": ["lib/extension-client.js", "content/notebooklm.js"],
       "css": ["content/notebooklm.css"],
       "run_at": "document_idle",
       "all_frames": false

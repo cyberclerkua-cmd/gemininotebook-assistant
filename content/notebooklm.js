@@ -56,7 +56,8 @@
   // Primary: ".single-source-container" (confirmed by notebooklm-py SOURCES_SELECTORS)
   // Fallbacks: common Angular Material patterns + generic source-card classes.
   const SOURCE_ROW_SELECTORS =
-    '.single-source-container, source-list-item, [data-source-id], .source-item, .source-card, .source-row, mat-list-option, .cdk-drag, [role="listitem"]';
+    '.single-source-container, source-list-item, [data-source-id], .source-item, .source-card, .source-row';
+  const SOURCE_LIST_SELECTORS = '.sources-panel, .source-list, .sources-list, [aria-label="Sources"], [aria-label="Источники"]';
 
   // Storage keys
   const TOOLBAR_POS_KEY = 'nlm_ext_toolbar_pos';
@@ -72,24 +73,15 @@
     }
   }
 
-  const MSG_TIMEOUT_MS = 8000; // BUG 11 fix (reduced from 15s — too long for UI)
-
   async function safeSendMessage(msg) {
     if (!isContextValid()) {
       showReloadBanner();
       throw new Error('Extension was updated. Please reload the page.');
     }
-    // BUG 11 fix: race against a timeout so the SW being asleep can't hang UI.
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => {
-        reject(new Error('Request timed out. Please try again.'));
-      }, MSG_TIMEOUT_MS);
-    });
     try {
-      return await Promise.race([
-        chrome.runtime.sendMessage(msg),
-        timeoutPromise
-      ]);
+      return await ExtensionClient.send(msg.cmd, msg.params || {}, {
+        timeoutMs: ['delete-sources', 'sync-drive-sources'].includes(msg.cmd) ? 300000 : 30000
+      });
     } catch (e) {
       if (e && e.message && e.message.includes('Extension context invalidated')) {
         showReloadBanner();
@@ -346,81 +338,33 @@
 
   // ─── Find source items in DOM ───
   function getSourceItems() {
-    const items = document.querySelectorAll(SOURCE_ROW_SELECTORS);
-    return Array.from(items).filter(el => {
-      if (!el.textContent || !el.textContent.trim()) return false;
-      if (el.offsetParent === null) return false; // hidden
-      return true;
-    });
+    const visible = el => !!el.textContent?.trim() && el.offsetParent !== null && !el.closest('.nlm-assistant-toolbar');
+    for (const selector of SOURCE_ROW_SELECTORS.split(', ')) {
+      const items = Array.from(document.querySelectorAll(selector)).filter(visible);
+      if (items.length) return items.filter(item => !items.some(other => other !== item && other.contains(item)));
+    }
+    // Generic list/drag selectors are only safe inside the Sources panel.
+    const panel = document.querySelector(SOURCE_LIST_SELECTORS);
+    return panel ? Array.from(panel.querySelectorAll('mat-list-option, .cdk-drag, [role="listitem"]')).filter(visible) : [];
   }
 
-  // ─── BUG 1 fix: Extract the EXACT source ID from a source row ───
-  // Tries multiple DOM strategies. Returns null if no ID could be extracted
-  // (caller falls back to EXACT title equality, with a warning).
+  // Only source-specific attributes or NotebookLM source links identify a
+  // source. Titles, aria-labels and generic data-id fields are not IDs.
   function getSourceIdFromRow(row) {
     if (!row) return null;
-
-    // Strategy 1: explicit data-source-id on the row itself
-    const direct = row.getAttribute('data-source-id') || row.dataset.sourceId;
-    if (direct) return direct;
-
-    // Strategy 2: descendant element carrying data-source-id
-    const withId = row.querySelector('[data-source-id]');
-    if (withId) {
-      const v = withId.getAttribute('data-source-id') || withId.dataset.sourceId;
-      if (v) return v;
+    for (const attribute of ['data-source-id', 'ng-reflect-source-id', 'data-ng-source-id']) {
+      const value = row.getAttribute(attribute) || row.querySelector(`[${attribute}]`)?.getAttribute(attribute);
+      if (value) return value;
     }
-
-    // Strategy 3: any <a> whose href contains /source/<id>
-    // NOTE: fixed typo in v3.3.2 — was 'aref]' (missing '['), which is an
-    // invalid selector and silently threw, so this strategy never ran.
-    const links = row.querySelectorAll('a[href]');
-    for (const link of links) {
-      const href = link.getAttribute('href') || '';
-      // Pattern: /notebook/<nb>/source/<id>
-      const m1 = href.match(/\/source\/([^/?#"']+)/);
-      if (m1 && m1[1]) return m1[1];
-      // Pattern: ?sourceId=... or &sourceId=...
-      const m2 = href.match(/[?&]sourceId=([^&"']+)/);
-      if (m2 && m2[1]) return m2[1];
+    for (const link of row.querySelectorAll('a[href]')) {
+      try {
+        const url = new URL(link.getAttribute('href'), location.href);
+        if (url.protocol !== 'https:' || !/^notebook(?:lm)?\.google\.com$/.test(url.hostname)) continue;
+        if (url.pathname.match(/\/notebook\/([^/]+)/)?.[1] !== getNotebookIdFromUrl()) continue;
+        const id = url.pathname.match(/\/source\/([A-Za-z0-9_-]+)/)?.[1] || url.searchParams.get('sourceId');
+        if (id) return id;
+      } catch (_) {}
     }
-
-    // Strategy 4: any element carrying generic data-id/data-sourceid/data-source/data-uid
-    const idCandidates = row.querySelectorAll('[data-id], [data-sourceid], [data-source], [data-uid]');
-    for (const c of idCandidates) {
-      const v = c.getAttribute('data-id') ||
-                c.getAttribute('data-sourceid') ||
-                c.getAttribute('data-source') ||
-                c.getAttribute('data-uid');
-      if (v) return v;
-    }
-
-    // Strategy 5 (v3.3.2): buttons/elements with aria-label containing a UUID.
-    // Gemini Notebook uses Angular Material and often embeds source IDs in
-    // aria-labels like "Open source <uuid>" or "More options for <uuid>".
-    const uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-    const ariaCandidates = row.querySelectorAll('[aria-label], [aria-describedby]');
-    for (const c of ariaCandidates) {
-      const label = c.getAttribute('aria-label') || c.getAttribute('aria-describedby') || '';
-      const m = label.match(uuidRe);
-      if (m && m[0]) return m[0];
-    }
-
-    // Strategy 6 (v3.3.2): the row's own id attribute (Angular sometimes sets
-    // id="source-<uuid>" or id="<uuid>" on the source card).
-    const rowId = row.getAttribute('id') || '';
-    const idMatch = rowId.match(uuidRe);
-    if (idMatch && idMatch[0]) return idMatch[0];
-
-    // Strategy 7 (v3.3.2): Angular component often stores the source object in
-    // a __ngContext__ or data-ng property. Scan all descendants for a
-    // data-ng-source or ng-reflect-source-id attribute (Angular reflection).
-    const ngCandidates = row.querySelectorAll('[ng-reflect-source-id], [data-ng-source-id]');
-    for (const c of ngCandidates) {
-      const v = c.getAttribute('ng-reflect-source-id') || c.getAttribute('data-ng-source-id');
-      if (v) return v;
-    }
-
     return null;
   }
 
@@ -428,6 +372,8 @@
   // Narrower than before: only returns specific source-title text, NOT the
   // entire row (which can include metadata and leak into matching).
   function getSourceTitle(el) {
+    const sourceButton = el.querySelector('.source-stretched-button[aria-label]');
+    if (sourceButton?.getAttribute('aria-label')) return sourceButton.getAttribute('aria-label').trim();
     // v3.3.4: try source-title elements first
     const titleEl = el.querySelector(
       '.source-title-column, .source-title, [class*="source-title"]'
@@ -435,7 +381,7 @@
     if (titleEl) return titleEl.textContent.trim();
     // v3.3.4: try aria-label on the source button (Gemini Notebook puts the
     // source title in aria-label, e.g. aria-label="VC4_CORE.md")
-    const btn = el.querySelector('button[aria-label], a[aria-label]');
+    const btn = el.querySelector('.source-stretched-button[aria-label]') || el.querySelector('button[aria-label], a[aria-label]');
     if (btn) {
       const label = btn.getAttribute('aria-label') || '';
       if (label) return label.trim();
@@ -453,7 +399,7 @@
 
   // ─── Add checkboxes to source items (BUG 1, BUG 8 fix) ───
   function addCheckboxes() {
-    if (!isEnabled) return;
+    if (!isEnabled || !getNotebookIdFromUrl()) return;
 
     // v3.3.5: skip on non-source-list pages. Gemini Notebook uses URL params
     // to indicate modal/overlay states where the source list isn't the main
@@ -527,8 +473,6 @@
       itemsNeedingCheckbox.push({ item, sourceId: sid });
     }
 
-    if (itemsNeedingCheckbox.length === 0) return;
-
     itemsNeedingCheckbox.forEach(({ item, sourceId }) => {
 
       item.classList.add('nlm-ext-has-checkbox');
@@ -570,62 +514,67 @@
   // IDs, not fuzzy title matching).
   let sourceIdCachePromise = null;
   let sourceIdCacheNotebookId = null;
+  let sourceIdCacheAuthuser = null;
+  let sourceIdCacheSources = [];
+  let sourceIdCacheAt = 0;
+  let sourceIdCacheGeneration = 0;
+
+  function invalidateSourceCache() {
+    sourceIdCacheGeneration++;
+    sourceIdCachePromise = null;
+    sourceIdCacheNotebookId = null;
+    sourceIdCacheSources = [];
+    sourceIdCacheAt = 0;
+  }
+
+  function cacheSourceIds(apiSources) {
+    const norm = text => (text || '').replace(/\s+/g, ' ').trim();
+    const titles = new Map();
+    for (const source of apiSources) {
+      const key = norm(source.title);
+      if (!titles.has(key)) titles.set(key, []);
+      titles.get(key).push(source);
+    }
+    for (const row of getSourceItems()) {
+      const exactId = getSourceIdFromRow(row);
+      const matches = titles.get(norm(getSourceTitle(row))) || [];
+      const source = apiSources.find(source => source.id === exactId) || (matches.length === 1 ? matches[0] : null);
+      const wrap = row.querySelector('.nlm-ext-checkbox-wrap');
+      if (source) row.setAttribute('data-nlm-source-id', source.id);
+      else row.removeAttribute('data-nlm-source-id');
+      if (wrap) wrap.setAttribute('data-nlm-source-id', source?.id || '');
+    }
+  }
 
   function ensureSourceIdCache() {
     const nbId = getNotebookIdFromUrl();
     if (!nbId) return;
-
-    // Don't re-fetch if we already have a cache for this notebook
-    // (re-fetch when notebook changes, or after a delete — see handleDelete)
-    if (sourceIdCacheNotebookId === nbId && sourceIdCachePromise) return;
-
+    if (sourceIdCacheNotebookId === nbId && sourceIdCacheAuthuser === currentAuthuser) {
+      if (sourceIdCachePromise) return sourceIdCachePromise;
+      if (Date.now() - sourceIdCacheAt < 5000) { cacheSourceIds(sourceIdCacheSources); return; }
+    }
+    const generation = ++sourceIdCacheGeneration;
+    const authuser = currentAuthuser;
     sourceIdCacheNotebookId = nbId;
-    sourceIdCachePromise = (async () => {
+    sourceIdCacheAuthuser = authuser;
+    const request = (async () => {
       try {
         const resp = await safeSendMessage({
           cmd: 'get-sources',
-          params: { notebookId: nbId, authuser: currentAuthuser }
+          params: { notebookId: nbId, authuser }
         });
-        let apiSources = [];
-        if (resp && Array.isArray(resp.sources)) apiSources = resp.sources;
-        else if (resp && resp.result && Array.isArray(resp.result.sources)) apiSources = resp.result.sources;
-        else if (Array.isArray(resp)) apiSources = resp;
-
-        if (!apiSources.length) return;
-
-        // Build title→id map (normalized for matching)
-        const norm = (t) => (t || '').toLowerCase().replace(/\s+/g, ' ').trim();
-        const titleToId = new Map();
-        for (const s of apiSources) {
-          if (s && s.id && s.title) {
-            titleToId.set(norm(s.title), s.id);
-          }
-        }
-
-        // Cache IDs on DOM rows
-        const rows = document.querySelectorAll(SOURCE_ROW_SELECTORS);
-        let cached = 0;
-        rows.forEach(row => {
-          if (row.getAttribute('data-nlm-source-id')) return; // already cached
-          const title = getSourceTitle(row);
-          if (!title) return;
-          const id = titleToId.get(norm(title));
-          if (id) {
-            row.setAttribute('data-nlm-source-id', id);
-            const wrap = row.querySelector('.nlm-ext-checkbox-wrap');
-            if (wrap) wrap.setAttribute('data-nlm-source-id', id);
-            cached++;
-          }
-        });
-
-        if (cached > 0) {
-          console.log('[Gemini Notebook Assistant] Cached ' + cached + ' source IDs via RPC for instant delete.');
-        }
+        if (generation !== sourceIdCacheGeneration || getNotebookIdFromUrl() !== nbId || currentAuthuser !== authuser) return;
+        sourceIdCacheSources = Array.isArray(resp.sources) ? resp.sources : [];
+        sourceIdCacheAt = Date.now();
+        cacheSourceIds(sourceIdCacheSources);
       } catch (e) {
         // Non-fatal — delete will fall back to fetching at delete time
         console.debug('[Gemini Notebook Assistant] Source ID cache fetch failed:', e.message);
       }
     })();
+    sourceIdCachePromise = request;
+    request.finally(() => { if (sourceIdCachePromise === request) sourceIdCachePromise = null; });
+    return request;
   }
 
   // ─── Debounced add checkboxes ───
@@ -764,10 +713,11 @@
 
   function setToolbarHidden(hidden) {
     const toolbar = document.querySelector('.nlm-ext-toolbar');
-    if (toolbar) toolbar.style.display = hidden ? 'none' : 'flex';
+    const enabledHere = isEnabled && !!getNotebookIdFromUrl();
+    if (toolbar) toolbar.style.display = !hidden && enabledHere ? 'flex' : 'none';
 
     let reopen = document.querySelector('.nlm-ext-reopen-btn');
-    if (hidden) {
+    if (hidden && enabledHere) {
       if (!reopen) {
         reopen = document.createElement('button');
         reopen.className = 'nlm-ext-reopen-btn';
@@ -801,45 +751,24 @@
     }
   }
 
-  // ─── BUG 7 fix: account loading & switcher ───
+  // Google defaults to account 0 when the page has no authuser parameter.
+  function getPageAuthuser() {
+    const query = new URLSearchParams(location.search).get('authuser');
+    const path = location.pathname.match(/^\/u\/(\d+)\//)?.[1];
+    const value = query ?? path ?? '0';
+    return /^\d+$/.test(value) ? Number(value) : 0;
+  }
+
+  // ─── Account loading & switcher ───
   async function loadActiveAccount() {
-    // Try the new spec'd command first
     try {
       const resp = await safeSendMessage({ cmd: 'get-active-account', params: {} });
-      if (resp && !resp.error) {
-        if (resp.result && typeof resp.result.authuser === 'number') {
-          currentAuthuser = resp.result.authuser;
-          accountsList = resp.result.accounts || [];
-        } else if (typeof resp.authuser === 'number') {
-          currentAuthuser = resp.authuser;
-          accountsList = resp.accounts || [];
-        }
-      } else {
-        throw new Error(resp && resp.error ? resp.error : 'no result');
-      }
+      accountsList = resp.accounts || [];
+      if (!accountsList.length) accountsList = await safeSendMessage({ cmd: 'list-accounts', params: {} });
     } catch (e) {
-      // Background may not yet implement `get-active-account`; fall back to list-accounts
-      try {
-        const accounts = await safeSendMessage({ cmd: 'list-accounts', params: {} });
-        if (Array.isArray(accounts) && accounts.length > 0) {
-          accountsList = accounts;
-          if (typeof accounts[0].authuser === 'number') {
-            currentAuthuser = accounts[0].authuser;
-          }
-        } else if (accounts && Array.isArray(accounts.result)) {
-          accountsList = accounts.result;
-          if (accountsList.length > 0 && typeof accountsList[0].authuser === 'number') {
-            currentAuthuser = accountsList[0].authuser;
-          }
-        }
-      } catch (e2) {
-        // Stay with default authuser=0; background will use its own currentAuthuser global.
-        console.warn(
-          '[Gemini Notebook Assistant] Could not load active account; using default authuser=0.',
-          e2
-        );
-      }
+      console.warn('[Gemini Notebook Assistant] Could not load accounts:', e.message);
     }
+    currentAuthuser = getPageAuthuser();
     renderAccountSwitcher();
   }
 
@@ -859,15 +788,18 @@
     }).join('');
   }
 
+  let accountSwitchId = 0;
   async function setActiveAccount(authuser) {
-    currentAuthuser = authuser;
-    // Prefer the new spec'd command; fall back to legacy set-authuser.
+    const switchId = ++accountSwitchId;
     try {
-      await safeSendMessage({ cmd: 'set-active-account', params: { authuser } });
+      const result = await safeSendMessage({ cmd: 'set-active-account', params: { authuser } });
+      if (switchId !== accountSwitchId) return;
+      if (result.superseded) { renderAccountSwitcher(); return; }
+      location.assign(`${location.origin}/?authuser=${authuser}`);
     } catch (e) {
-      try {
-        await safeSendMessage({ cmd: 'set-authuser', params: { authuser } });
-      } catch (e2) { /* background may not yet support either; ignore */ }
+      if (switchId !== accountSwitchId) return;
+      showToast('Account switch failed: ' + e.message);
+      renderAccountSwitcher();
     }
   }
 
@@ -979,65 +911,26 @@
     btn.innerHTML = '<i class="nlm-ms nlm-ms-hourglass_empty"></i> Deleting...';
 
     try {
-      // BUG 1 fix: collect exact source IDs cached on each checkbox wrap / row
-      const sourceIds = [];
-      const fallbackRows = []; // rows where no DOM source ID was found
-
-      checked.forEach(cb => {
-        const row = cb.closest(SOURCE_ROW_SELECTORS);
-        if (!row) return;
-        const wrap = cb.closest('.nlm-ext-checkbox-wrap');
-        const id = (wrap && wrap.getAttribute('data-nlm-source-id')) ||
-                   row.getAttribute('data-nlm-source-id') ||
-                   getSourceIdFromRow(row);
-        if (id) {
-          if (!sourceIds.includes(id)) sourceIds.push(id);
-        } else {
-          fallbackRows.push(row);
+      const authuser = currentAuthuser;
+      const rows = [...new Set(Array.from(checked).map(cb => cb.closest('.nlm-ext-has-checkbox')).filter(Boolean))];
+      const notebook = await safeSendMessage({ cmd: 'get-sources', params: { notebookId: nbId, authuser } });
+      const apiSources = notebook.sources || [];
+      const norm = text => (text || '').replace(/\s+/g, ' ').trim();
+      const sourceIds = rows.map(row => {
+        const exactId = getSourceIdFromRow(row);
+        const exact = apiSources.find(source => source.id === exactId);
+        if (exact) return exact.id;
+        const matches = apiSources.filter(source => norm(source.title) === norm(getSourceTitle(row)));
+        if (matches.length > 1) {
+          throw new Error('Multiple sources share this title. Select them by ID in the extension Sources tab.');
         }
+        if (matches.length !== 1) throw new Error('Could not determine every selected source ID. Refresh the source list and retry.');
+        return matches[0].id;
       });
-
-      // BUG 1 fix: for rows without a DOM ID, fall back to EXACT title equality
-      // against the API source list (NOT `includes`, NOT bidirectional).
-      if (fallbackRows.length > 0) {
-        console.warn(
-          `[Gemini Notebook Assistant] Falling back to EXACT title match for ` +
-          `${fallbackRows.length} row(s) without a DOM source ID.`
-        );
-        let apiSources = [];
-        try {
-          const resp = await safeSendMessage({
-            cmd: 'get-sources',
-            params: { notebookId: nbId, authuser: currentAuthuser }
-          });
-          if (resp && Array.isArray(resp.sources)) apiSources = resp.sources;
-          else if (resp && resp.result && Array.isArray(resp.result.sources)) apiSources = resp.result.sources;
-        } catch (e) { /* ignore — we'll just skip these rows */ }
-
-        const norm = (t) => (t || '').toLowerCase().replace(/\s+/g, ' ').trim();
-        const seen = new Set(sourceIds);
-        fallbackRows.forEach(row => {
-          const title = getSourceTitle(row);
-          if (!title) return;
-          const match = apiSources.find(s => norm(s.title) === norm(title));
-          if (match && !seen.has(match.id)) {
-            sourceIds.push(match.id);
-            seen.add(match.id);
-            // Cache it for next time
-            row.setAttribute('data-nlm-source-id', match.id);
-            const wrap = row.querySelector('.nlm-ext-checkbox-wrap');
-            if (wrap) wrap.setAttribute('data-nlm-source-id', match.id);
-          } else {
-            console.warn(
-              `[Gemini Notebook Assistant] No exact title match for row titled "${title}"; skipping.`
-            );
-          }
-        });
+      if (!sourceIds.length || new Set(sourceIds).size !== rows.length) {
+        throw new Error('The selected rows cannot be mapped to distinct source IDs. Use the extension Sources tab.');
       }
-
-      if (sourceIds.length === 0) {
-        throw new Error('Could not determine source IDs for the selected rows.');
-      }
+      if (getNotebookIdFromUrl() !== nbId || currentAuthuser !== authuser) throw new Error('The notebook changed. Please retry.');
 
       const confirmMsg = `Delete ${sourceIds.length} source(s)?`;
       if (!confirm(confirmMsg)) {
@@ -1046,33 +939,20 @@
         return;
       }
 
-      await safeSendMessage({
+      const result = await safeSendMessage({
         cmd: 'delete-sources',
-        params: { notebookId: nbId, sourceIds, authuser: currentAuthuser }
+        params: { notebookId: nbId, sourceIds, authuser }
       });
-
-      // BUG 2 fix: remove rows from the DOM directly (no reload).
-      let removed = 0;
-      checked.forEach(cb => {
-        const row = cb.closest(SOURCE_ROW_SELECTORS);
-        if (row && row.parentNode) {
-          row.remove();
-          removed++;
-        }
-      });
-
-      if (removed === 0) {
-        // Fallback: reload if DOM removal somehow failed
-        console.warn('[Gemini Notebook Assistant] DOM row removal failed; reloading page.');
-        location.reload();
-        return;
+      if (!result.success || result.deleted !== sourceIds.length) throw new Error('Source deletion was not confirmed');
+      if (getNotebookIdFromUrl() === nbId && currentAuthuser === authuser) {
+        rows.forEach(row => row.remove());
       }
 
       showToast(`Deleted ${sourceIds.length} source(s)`);
 
       // v3.3.4: invalidate the source ID cache so it re-fetches on next addCheckboxes
-      sourceIdCacheNotebookId = null;
-      sourceIdCachePromise = null;
+      invalidateSourceCache();
+      ensureSourceIdCache();
 
       updateToolbar();
       btn.disabled = false;
@@ -1128,7 +1008,7 @@
       const r = (result && (result.results || (result.result && result.result.results))) || {};
       const synced = r.synced || 0;
       btn.innerHTML = `<i class="nlm-ms nlm-ms-check"></i> ${synced} synced`;
-      showToast(`Synced ${synced} source(s) from Drive`);
+      showToast(`Synced ${synced} source(s) from Drive${r.errors ? ', ' + r.errors + ' errors' : ''}`);
       setTimeout(() => {
         btn.disabled = false;
         btn.innerHTML = origHtml;
@@ -1191,8 +1071,13 @@
       // (b) source-list change → debounced addCheckboxes()
       let sourceListChanged = false;
       for (const m of mutations) {
-        if (!m.addedNodes || m.addedNodes.length === 0) continue;
-        for (const node of m.addedNodes) {
+        if (m.target.closest?.('.nlm-assistant-toolbar, .nlm-ext-checkbox-wrap, .nlm-ext-toast')) continue;
+        if (m.type === 'attributes' && m.target.closest?.(SOURCE_ROW_SELECTORS)) { sourceListChanged = true; break; }
+        for (const node of [...m.addedNodes, ...m.removedNodes]) {
+          if (node.nodeType === 1 && node.matches('.nlm-ext-checkbox-wrap')) continue;
+          if (m.target.closest?.(SOURCE_ROW_SELECTORS) || m.target.matches?.(SOURCE_LIST_SELECTORS)) {
+            sourceListChanged = true; break;
+          }
           if (node.nodeType !== 1) continue;
           if (node.matches && node.matches(SOURCE_ROW_SELECTORS)) {
             sourceListChanged = true; break;
@@ -1203,9 +1088,10 @@
         }
         if (sourceListChanged) break;
       }
-      if (sourceListChanged) scheduleAddCheckboxes(200);
+      if (sourceListChanged) { invalidateSourceCache(); scheduleAddCheckboxes(200); }
     });
-    bodyObserver.observe(document.body, { childList: true, subtree: true });
+    bodyObserver.observe(document.body, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ['aria-label', 'data-source-id', 'href'] });
   }
 
   // ─── BUG 3 fix: debounced setup ───
@@ -1222,6 +1108,7 @@
     document.querySelectorAll('.nlm-ext-checkbox-wrap').forEach(el => el.remove());
     document.querySelectorAll('.nlm-ext-has-checkbox').forEach(el => {
       el.classList.remove('nlm-ext-has-checkbox');
+      el.removeAttribute('data-nlm-source-id');
     });
   }
 
@@ -1237,6 +1124,8 @@
   function setup() {
     const nbId = getNotebookIdFromUrl();
     if (!nbId) {
+      currentNotebookId = null;
+      invalidateSourceCache();
       // Not on a notebook page — hide UI
       const toolbar = document.querySelector('.nlm-ext-toolbar');
       if (toolbar) toolbar.style.display = 'none';
@@ -1252,10 +1141,17 @@
     // throttle so the diagnostic warning can fire once on the new notebook too.
     if (currentNotebookId && currentNotebookId !== nbId) {
       cleanupCheckboxes();
+      invalidateSourceCache();
       sourceIdWarnedThisPass = false;
     }
     currentNotebookId = nbId;
-
+    const pageAuthuser = getPageAuthuser();
+    if (currentAuthuser !== pageAuthuser) {
+      currentAuthuser = pageAuthuser;
+      invalidateSourceCache();
+      renderAccountSwitcher();
+    }
+    if (!bodyObserver) startBodyObserver();
     if (!isEnabled) return;
 
     // Show/create toolbar (respecting hidden state)
@@ -1303,6 +1199,7 @@
 
   // ─── Init ───
   async function init() {
+    currentAuthuser = getPageAuthuser();
     document.documentElement.setAttribute('data-nlm-ext', 'v3');
 
     if (!isContextValid()) {
@@ -1346,6 +1243,7 @@
 
       // SPA back/forward (BUG 3 fix: popstate only — no pushState/replaceState patches)
       window.addEventListener('popstate', () => scheduleSetup(500));
+      window.navigation?.addEventListener('navigatesuccess', () => scheduleSetup(100));
 
       // Settings changes
       chrome.storage.onChanged.addListener((changes, ns) => {
@@ -1354,14 +1252,12 @@
           isEnabled = changes.enableBulkDelete.newValue !== false;
           const toolbar = document.querySelector('.nlm-ext-toolbar');
           const reopen = document.querySelector('.nlm-ext-reopen-btn');
-          if (toolbar && !reopen) {
-            toolbar.style.display = isEnabled ? 'flex' : 'none';
-          }
           if (!isEnabled) {
+            if (toolbar) toolbar.style.display = 'none';
+            if (reopen) reopen.remove();
             cleanupCheckboxes();
           } else {
-            addCheckboxes();
-            if (!bodyObserver) startBodyObserver();
+            setup();
           }
         }
         if (changes.enableSyncDrive) {

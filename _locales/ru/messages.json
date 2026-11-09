@@ -366,5 +366,80 @@
   },
   "permissionDenied": {
     "message": "Разрешение отклонено"
+  },
+  "tabsSelectedCount": {
+    "message": "Выбрано вкладок: $CURRENT$ из $TOTAL$",
+    "placeholders": { "CURRENT": { "content": "$1" }, "TOTAL": { "content": "$2" } }
+  },
+  "failedLoadNotebooks": {
+    "message": "Не удалось загрузить блокноты"
+  },
+  "selectNotebookFirst": {
+    "message": "Сначала выберите блокнот"
+  },
+  "noTabsSelected": {
+    "message": "Вкладки не выбраны"
+  },
+  "addedToQueue": {
+    "message": "Добавлено вкладок в очередь: $COUNT$",
+    "placeholders": { "COUNT": { "content": "$1" } }
+  },
+  "timeJustNow": {
+    "message": "только что"
+  },
+  "timeMinutesAgo": {
+    "message": "$COUNT$ мин. назад",
+    "placeholders": { "COUNT": { "content": "$1" } }
+  },
+  "timeHoursAgo": {
+    "message": "$COUNT$ ч. назад",
+    "placeholders": { "COUNT": { "content": "$1" } }
+  },
+  "pendingPdf": {
+    "message": "Страница для сохранения PDF: $TITLE$",
+    "placeholders": { "TITLE": { "content": "$1" } }
+  },
+  "queueReady": {
+    "message": "Готово к обработке URL: $COUNT$",
+    "placeholders": { "COUNT": { "content": "$1" } }
+  },
+  "queueRunning": {
+    "message": "Обработка: добавлено $COUNT$ из $TOTAL$, ошибок $ERRORS$",
+    "placeholders": { "COUNT": { "content": "$1" }, "TOTAL": { "content": "$2" }, "ERRORS": { "content": "$3" } }
+  },
+  "queueDone": {
+    "message": "Готово: добавлено $COUNT$, ошибок $ERRORS$",
+    "placeholders": { "COUNT": { "content": "$1" }, "ERRORS": { "content": "$2" } }
+  },
+  "queueCancelled": {
+    "message": "Обработка очереди отменена"
+  },
+  "queueRetry": {
+    "message": "Повторить ошибочные элементы"
+  },
+  "queueFailedItem": {
+    "message": "Ошибка"
+  },
+  "queueProcessingItem": {
+    "message": "Обрабатывается"
+  },
+  "queuePendingItem": {
+    "message": "Ожидает"
+  },
+  "importBatchSummary": {
+    "message": "Добавлено $COUNT$; ошибок $FAILED$; не отправлено $PENDING$; результат не подтверждён $UNKNOWN$.",
+    "placeholders": { "COUNT": { "content": "$1" }, "FAILED": { "content": "$2" }, "PENDING": { "content": "$3" }, "UNKNOWN": { "content": "$4" } }
+  },
+  "importUncertainHint": {
+    "message": "Проверьте неподтверждённые источники в блокноте. Они исключены из автоматического повтора, чтобы не создавать дубликаты."
+  },
+  "importResultFailed": {
+    "message": "Ошибка — готово к повтору"
+  },
+  "importResultPending": {
+    "message": "Не отправлено — готово к повтору"
+  },
+  "importResultUncertain": {
+    "message": "Результат не подтверждён — проверьте блокнот"
   }
 }

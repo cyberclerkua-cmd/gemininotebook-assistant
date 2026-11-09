@@ -15,6 +15,8 @@ const countEl = document.getElementById('count');
 const statusEl = document.getElementById('status');
 
 let tabs = [];
+let currentAuthuser = null;
+let notebookLoadId = 0;
 
 // ─── Helpers ───
 
@@ -41,24 +43,8 @@ function escapeHtml(text) {
  * otherwise returns the raw response (legacy/actual background behavior).
  */
 async function bg(cmd, params = {}) {
-  let response;
-  try {
-    response = await chrome.runtime.sendMessage({ cmd, params });
-  } catch (e) {
-    // SW asleep, port closed, receiving end does not exist, etc.
-    throw new Error(e && e.message ? e.message : String(e));
-  }
-  if (response && typeof response === 'object' && !Array.isArray(response) &&
-      Object.prototype.hasOwnProperty.call(response, 'error')) {
-    throw new Error(typeof response.error === 'string' ? response.error : JSON.stringify(response.error));
-  }
-  // Unwrap { result: ... } envelope (FIX-SPEC contract).
-  if (response && typeof response === 'object' && !Array.isArray(response) &&
-      Object.prototype.hasOwnProperty.call(response, 'result') &&
-      Object.keys(response).length === 1) {
-    return response.result;
-  }
-  return response;
+  return ExtensionClient.send(cmd, { ...(currentAuthuser !== null ? { authuser: currentAuthuser } : {}), ...params },
+    { timeoutMs: cmd === 'add-sources' ? 300000 : 30000 });
 }
 
 /** Localized string helper — falls back to the key if i18n is not loaded. */
@@ -101,7 +87,7 @@ async function loadTabs() {
     tabs = Array.isArray(resp) ? resp : [];
   } catch (e) {
     tabs = [];
-    const msg = t('failedLoadTabs', { MSG: (e && e.message) ? e.message : String(e) });
+    const msg = t('failedLoadTabs', { ERROR: (e && e.message) ? e.message : String(e) });
     showStatusWithAction(msg, 'error',
       ' <button class="btn btn-retry" id="retry-load-tabs" type="button">' +
       escapeHtml(t('retry')) + '</button>');
@@ -145,7 +131,7 @@ async function loadTabs() {
     // Build structure with innerHTML; every dynamic value is escapeHtml'd.
     li.innerHTML = `
       <input type="checkbox" class="tab-cb" data-idx="${i}" checked>
-      <img src="${escapeHtml(tab.favIconUrl || 'icons/icon16.png')}" alt="">
+      <img src="${escapeHtml(tab.favIconUrl || '../icons/icon16.png')}" alt="">
       <span class="title">${escapeHtml(tab.title)}</span>
       <span class="url">${escapeHtml(tab.url)}</span>
     `;
@@ -155,7 +141,7 @@ async function loadTabs() {
     img.addEventListener('error', function () {
       if (!this.dataset.fallback) {
         this.dataset.fallback = '1';
-        this.src = 'icons/icon16.png';
+        this.src = '../icons/icon16.png';
       }
     });
     li.querySelector('.tab-cb').addEventListener('change', updateCount);
@@ -168,8 +154,14 @@ async function loadTabs() {
 // ─── Notebook loading ───
 
 async function loadNotebooks() {
+  const loadId = ++notebookLoadId;
+  notebookSelect.innerHTML = `<option value="">${escapeHtml(t('selectNotebook'))}</option>`;
   try {
-    const notebooks = await bg('list-notebooks', {});
+    const active = await bg('get-active-account');
+    if (loadId !== notebookLoadId) return;
+    currentAuthuser = active.authuser;
+    const notebooks = await bg('list-notebooks', { authuser: currentAuthuser });
+    if (loadId !== notebookLoadId) return;
     if (Array.isArray(notebooks)) {
       notebooks.forEach(nb => {
         const opt = document.createElement('option');
@@ -178,10 +170,23 @@ async function loadNotebooks() {
         notebookSelect.appendChild(opt);
       });
     }
+    const stored = await chrome.storage.local.get(['lastNotebookByAccount', 'lastNotebookId', 'lastNotebookAuthuser']);
+    const id = stored.lastNotebookByAccount?.[active.authuser] ||
+      ((stored.lastNotebookAuthuser === active.authuser || (stored.lastNotebookAuthuser === undefined && active.authuser === 0))
+        ? stored.lastNotebookId : '');
+    if (id) notebookSelect.value = id;
   } catch (e) {
     showStatus(t('failedLoadNotebooks'), 'error');
   }
 }
+
+notebookSelect.addEventListener('change', async () => {
+  try { await bg('set-last-notebook', { notebookId: notebookSelect.value }); }
+  catch (error) { showStatus(error.message, 'error'); }
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'sync' && changes.activeAccount) loadNotebooks();
+});
 
 // ─── Selection helpers ───
 
@@ -206,7 +211,7 @@ document.getElementById('select-all').addEventListener('click', () => {
     cbs.forEach(cb => { cb.checked = !allChecked; });
     updateCount();
   } catch (e) {
-    showStatus(t('importError', { MSG: (e && e.message) ? e.message : String(e) }), 'error');
+    showStatus(t('importError', { ERROR: (e && e.message) ? e.message : String(e) }), 'error');
   }
 });
 
@@ -226,18 +231,31 @@ document.getElementById('add-selected').addEventListener('click', async () => {
     }
 
     showStatus(t('importing', { COUNT: urls.length }), 'info');
-
+    const selected = Array.from(document.querySelectorAll('.tab-cb:checked'));
+    const controls = Array.from(document.querySelectorAll('.tab-cb, #select-all, #add-selected, #add-as-queue'));
+    controls.forEach(control => { control.disabled = true; });
+    document.getElementById('import-results').replaceChildren();
     try {
-      await bg('add-sources', {
+      const result = await bg('add-sources', {
         notebookId: nbId,
         urls: urls.map(u => u.url)
       });
-      showStatus(t('importDone', { COUNT: urls.length }), 'success');
+      ImportResults.render(document.getElementById('import-results'), result, t);
+      if (result.success) showStatus(t('importDone', { COUNT: result.count }), 'success');
+      else {
+        result.results.forEach((item, index) => {
+          if (item.status === 'added' || item.status === 'uncertain') selected[index].checked = false;
+        });
+        updateCount();
+        showStatus(ImportResults.summary(result, t) + '\n' + result.message, result.count ? 'warning' : 'error');
+      }
     } catch (e) {
-      showStatus(t('importError', { MSG: (e && e.message) ? e.message : String(e) }), 'error');
+      showStatus(t('importError', { ERROR: (e && e.message) ? e.message : String(e) }), 'error');
+    } finally {
+      controls.forEach(control => { control.disabled = false; });
     }
   } catch (e) {
-    showStatus(t('importError', { MSG: (e && e.message) ? e.message : String(e) }), 'error');
+    showStatus(t('importError', { ERROR: (e && e.message) ? e.message : String(e) }), 'error');
   }
 });
 
@@ -254,10 +272,10 @@ document.getElementById('add-as-queue').addEventListener('click', async () => {
       await bg('add-to-queue', { items: urls });
       showStatus(t('addedToQueue', { COUNT: urls.length }), 'success');
     } catch (e) {
-      showStatus(t('importError', { MSG: (e && e.message) ? e.message : String(e) }), 'error');
+      showStatus(t('importError', { ERROR: (e && e.message) ? e.message : String(e) }), 'error');
     }
   } catch (e) {
-    showStatus(t('importError', { MSG: (e && e.message) ? e.message : String(e) }), 'error');
+    showStatus(t('importError', { ERROR: (e && e.message) ? e.message : String(e) }), 'error');
   }
 });
 

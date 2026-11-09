@@ -118,6 +118,10 @@
     .status.success { display: flex; background: #e6f4ea; color: #137333; }
     .status.error { display: flex; background: #fce8e6; color: #c5221f; }
     .status.info { display: flex; background: #e8f0fe; color: #1a73e8; }
+    .status.warning { display: flex; background: #fef7e0; color: #795700; }
+    #import-results { margin-top: 12px; font-size: 12px; }
+    #import-results ul { padding-left: 18px; }
+    .import-result { overflow-wrap: anywhere; margin: 6px 0; }
     .count { font-size: 13px; color: #5f6368; }
     .empty-state {
       padding: 24px;
@@ -147,8 +151,11 @@
 
   <ul class="tab-list" id="tab-list"></ul>
   <div class="status" id="status"></div>
+  <div id="import-results"></div>
 
   <script src="../lib/i18n.js"></script>
+  <script src="../lib/extension-client.js"></script>
+  <script src="../lib/import-results.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

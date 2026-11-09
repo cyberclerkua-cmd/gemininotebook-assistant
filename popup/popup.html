@@ -68,6 +68,11 @@
       </button>
     </div>
 
+    <div class="info-box row" id="pending-pdf-info" style="display:none">
+      <span class="flex-1" id="pending-pdf-title"></span>
+      <button class="btn btn-sm" id="cancel-pending-pdf" title="Cancel pending PDF">&times;</button>
+    </div>
+
     <!-- Single URL add -->
     <div class="row">
       <input type="text" class="input flex-1" id="single-url" data-i18n-placeholder="enterUrl" placeholder="Enter URL...">
@@ -82,6 +87,7 @@
         <button class="btn btn-primary" id="bulk-add"><i class="ms ms-add"></i> <span data-i18n="addAll">Add all</span></button>
         <button class="btn" id="bulk-queue"><i class="ms ms-queue"></i> <span data-i18n="addToQueue">Add to queue</span></button>
       </div>
+      <div id="bulk-results" class="results-list"></div>
     </details>
 
     <!-- Open the full-page tab manager (app/app.html) -->
@@ -105,7 +111,7 @@
         <label data-i18n="commentsMode">Sort by</label>
         <select id="comments-mode" class="select">
           <option value="top" data-i18n="commentsTop">Top comments</option>
-          <option value="new" data-i18n="commentsNewest">Newest first</option>
+          <option value="newest" data-i18n="commentsNewest">Newest first</option>
         </select>
       </div>
       <div class="row">
@@ -159,6 +165,7 @@
       </button>
       <div id="links-results" class="results-list"></div>
     </div>
+    <div class="status" id="parsers-status"></div>
   </section>
 
   <!-- ═══════ QUEUE TAB ═══════ -->
@@ -175,6 +182,7 @@
         </button>
         <button class="btn" id="clear-queue"><i class="ms ms-delete"></i> <span data-i18n="clearQueue">Clear</span></button>
       </div>
+      <button class="btn btn-full mt-8" id="retry-failed" style="display:none"><span data-i18n="queueRetry">Retry failed items</span></button>
       <div class="status" id="queue-status"></div>
     </div>
   </section>
@@ -259,12 +267,17 @@
         <button class="btn" id="restore-settings"><i class="ms ms-upload"></i> <span data-i18n="settingsRestore">Restore</span></button>
         <input type="file" id="restore-file" accept=".json" style="display:none">
       </div>
+      <div class="status" id="settings-status"></div>
     </div>
   </section>
 
 </div>
 
 <script src="../lib/i18n.js"></script>
+<script src="../lib/extension-client.js"></script>
+<script src="../lib/url-utils.js"></script>
+<script src="../lib/settings-backup.js"></script>
+<script src="../lib/import-results.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

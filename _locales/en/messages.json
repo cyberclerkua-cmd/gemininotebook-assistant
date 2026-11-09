@@ -366,5 +366,80 @@
   },
   "permissionDenied": {
     "message": "Permission denied"
+  },
+  "tabsSelectedCount": {
+    "message": "$CURRENT$ of $TOTAL$ tabs selected",
+    "placeholders": { "CURRENT": { "content": "$1" }, "TOTAL": { "content": "$2" } }
+  },
+  "failedLoadNotebooks": {
+    "message": "Failed to load notebooks"
+  },
+  "selectNotebookFirst": {
+    "message": "Select a notebook first"
+  },
+  "noTabsSelected": {
+    "message": "No tabs selected"
+  },
+  "addedToQueue": {
+    "message": "$COUNT$ tabs added to the queue",
+    "placeholders": { "COUNT": { "content": "$1" } }
+  },
+  "timeJustNow": {
+    "message": "just now"
+  },
+  "timeMinutesAgo": {
+    "message": "$COUNT$m ago",
+    "placeholders": { "COUNT": { "content": "$1" } }
+  },
+  "timeHoursAgo": {
+    "message": "$COUNT$h ago",
+    "placeholders": { "COUNT": { "content": "$1" } }
+  },
+  "pendingPdf": {
+    "message": "PDF ready to capture: $TITLE$",
+    "placeholders": { "TITLE": { "content": "$1" } }
+  },
+  "queueReady": {
+    "message": "$COUNT$ URLs ready to process",
+    "placeholders": { "COUNT": { "content": "$1" } }
+  },
+  "queueRunning": {
+    "message": "Processing: $COUNT$ of $TOTAL$ added, $ERRORS$ failed",
+    "placeholders": { "COUNT": { "content": "$1" }, "TOTAL": { "content": "$2" }, "ERRORS": { "content": "$3" } }
+  },
+  "queueDone": {
+    "message": "Done: $COUNT$ added, $ERRORS$ failed",
+    "placeholders": { "COUNT": { "content": "$1" }, "ERRORS": { "content": "$2" } }
+  },
+  "queueCancelled": {
+    "message": "Queue processing cancelled"
+  },
+  "queueRetry": {
+    "message": "Retry failed items"
+  },
+  "queueFailedItem": {
+    "message": "Failed"
+  },
+  "queueProcessingItem": {
+    "message": "Processing"
+  },
+  "queuePendingItem": {
+    "message": "Pending"
+  },
+  "importBatchSummary": {
+    "message": "Added $COUNT$; failed $FAILED$; not attempted $PENDING$; unconfirmed $UNKNOWN$.",
+    "placeholders": { "COUNT": { "content": "$1" }, "FAILED": { "content": "$2" }, "PENDING": { "content": "$3" }, "UNKNOWN": { "content": "$4" } }
+  },
+  "importUncertainHint": {
+    "message": "Check unconfirmed sources in the notebook. They are excluded from automatic retry to avoid duplicate imports."
+  },
+  "importResultFailed": {
+    "message": "Failed — ready to retry"
+  },
+  "importResultPending": {
+    "message": "Not attempted — ready to retry"
+  },
+  "importResultUncertain": {
+    "message": "Result unconfirmed — check the notebook"
   }
 }

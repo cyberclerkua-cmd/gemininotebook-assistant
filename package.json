@@ -1,0 +1,15 @@
+{
+  "name": "gemininotebook-assistant",
+  "version": "3.3.9",
+  "private": true,
+  "description": "Development checks for the Gemini Notebook Assistant Chrome extension",
+  "scripts": {
+    "check": "node scripts/check.cjs",
+    "test:unit": "node --test tests/unit/*.test.cjs",
+    "test:browser": "playwright test",
+    "test": "npm run check && npm run test:unit && npm run test:browser",
+    "package": "npm run check && node scripts/package.cjs"
+  },
+  "engines": { "node": ">=22" },
+  "devDependencies": { "@playwright/test": "1.65.0", "fflate": "0.8.2" }
+}

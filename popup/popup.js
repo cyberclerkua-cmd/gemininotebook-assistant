@@ -1,9 +1,11 @@
-/* Gemini Notebook Assistant v3.0 — Popup Logic */
+/* Gemini Notebook Assistant v3.3.9 — Popup Logic */
 
 // ─── Helpers ───
 const $ = sel => document.querySelector(sel);
 const $$ = sel => document.querySelectorAll(sel);
-const bg = (cmd, params = {}) => chrome.runtime.sendMessage({ cmd, params });
+const bg = (cmd, params = {}) => ExtensionClient.send(cmd, { authuser: currentAuthuser, ...params }, {
+  timeoutMs: ['add-as-pdf', 'sync-drive-sources', 'parse-rss', 'add-sources', 'delete-sources'].includes(cmd) ? 300000 : 30000
+});
 
 // i18n helper — returns the key itself if I18n isn't ready / key missing
 function t(key, substitutions = {}) {
@@ -14,11 +16,15 @@ function t(key, substitutions = {}) {
 }
 
 function showStatus(elId, msg, type, duration = 4000) {
-  const el = $(elId);
+  let el = $(elId);
+  if (el?.closest('.panel') && !el.closest('.panel').classList.contains('active')) {
+    el = $('.panel.active .status') || el;
+  }
   if (!el) return;
+  clearTimeout(el._statusTimer);
   el.textContent = msg;
   el.className = `status show ${type}`;
-  if (duration > 0) setTimeout(() => { el.className = 'status'; }, duration);
+  if (duration > 0) el._statusTimer = setTimeout(() => { el.className = 'status'; }, duration);
 }
 
 // Escapes <, >, &, " and ' so the output is safe in BOTH text content AND
@@ -35,9 +41,9 @@ function escapeHtml(text) {
 
 function timeAgo(ts) {
   const diff = Date.now() - ts;
-  if (diff < 60000) return 'just now';
-  if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
-  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+  if (diff < 60000) return t('timeJustNow');
+  if (diff < 3600000) return t('timeMinutesAgo', { COUNT: Math.floor(diff / 60000) });
+  if (diff < 86400000) return t('timeHoursAgo', { COUNT: Math.floor(diff / 3600000) });
   return new Date(ts).toLocaleDateString();
 }
 
@@ -58,7 +64,13 @@ const sourceIcons = {
 
 // ─── State ───
 let currentNotebookId = null;
+let currentAuthuser = 0;
+let accountSelectionId = 0;
+let notebookLoadId = 0;
+let sourceLoadId = 0;
+let pendingPdf = null;
 let parseTimer = null;
+let currentParseId = null;
 
 // ═══════════════════════════════════════
 // TAB NAVIGATION
@@ -107,7 +119,7 @@ $('#settings-theme').addEventListener('change', async (e) => {
   try {
     await chrome.storage.sync.set({ theme });
   } catch (err) {
-    showStatus('#home-status', `Error saving theme: ${escapeHtml(err.message)}`, 'error');
+    showStatus('#home-status', `Error saving theme: ${err.message}`, 'error');
     return;
   }
   applyTheme(theme);
@@ -126,22 +138,17 @@ async function initI18n() {
 // ACCOUNTS
 // ═══════════════════════════════════════
 async function loadAccounts() {
+  const loadId = ++accountSelectionId;
   const select = $('#account-select');
   select.innerHTML = '<option value="">Loading...</option>';
   try {
     const accounts = await bg('list-accounts');
+    if (loadId !== accountSelectionId) return;
     select.innerHTML = '';
     if (Array.isArray(accounts) && accounts.length > 0) {
-      // Read the persisted active account (DO NOT hardcode 0 anymore)
-      let activeAuthuser = 0;
-      try {
-        const active = await bg('get-active-account');
-        if (active && typeof active.authuser === 'number') {
-          activeAuthuser = active.authuser;
-        }
-      } catch (_) {
-        // Background may be older version (no get-active-account); fall back to 0
-      }
+      const active = await bg('get-active-account');
+      if (loadId !== accountSelectionId) return;
+      const activeAuthuser = active.authuser;
 
       accounts.forEach(acc => {
         const opt = document.createElement('option');
@@ -154,39 +161,50 @@ async function loadAccounts() {
       const exists = accounts.some(a => Number(a.authuser) === Number(activeAuthuser));
       const selectedAuthuser = exists ? Number(activeAuthuser) : Number(accounts[0].authuser);
       select.value = String(selectedAuthuser);
+      currentAuthuser = selectedAuthuser;
 
-      // Sync background's in-memory currentAuthuser with the persisted value
-      try {
-        await bg('set-active-account', { authuser: selectedAuthuser });
-      } catch (_) {
-        // Background may not yet support set-active-account; fall back silently
-        try {
-          await bg('set-authuser', { authuser: selectedAuthuser });
-        } catch (_) { /* ignore */ }
-      }
-      await loadNotebooks();
+      if (!exists) await selectAccount(selectedAuthuser);
+      else await loadNotebooks();
     } else {
       select.innerHTML = '<option value="">No accounts found</option>';
     }
   } catch (e) {
+    if (loadId !== accountSelectionId) return;
     select.innerHTML = '<option value="">Error loading accounts</option>';
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
   }
 }
 
-$('#account-select').addEventListener('change', async (e) => {
-  const authuser = parseInt(e.target.value) || 0;
+async function selectAccount(authuser) {
+  const selectionId = ++accountSelectionId;
+  currentAuthuser = authuser;
+  currentNotebookId = null;
+  currentSources = [];
+  notebookLoadId++;
+  sourceLoadId++;
+  $('#notebook-select').disabled = true;
+  $('#notebook-select').innerHTML = '<option value="">Loading...</option>';
   try {
-    try {
-      await bg('set-active-account', { authuser });
-    } catch (_) {
-      // Fall back to legacy command if background doesn't support the new one
-      await bg('set-authuser', { authuser });
-    }
+    const result = await bg('set-active-account', { authuser });
+    if (selectionId !== accountSelectionId) return;
+    currentAuthuser = result.authuser;
+    $('#account-select').value = String(currentAuthuser);
     await loadNotebooks();
   } catch (err) {
-    showStatus('#home-status', `Error: ${escapeHtml(err.message)}`, 'error');
+    if (selectionId !== accountSelectionId) return;
+    const active = await bg('get-active-account').catch(() => null);
+    if (selectionId !== accountSelectionId) return;
+    if (active) {
+      currentAuthuser = active.authuser;
+      $('#account-select').value = String(currentAuthuser);
+      await loadNotebooks();
+    }
+    if (selectionId !== accountSelectionId) return;
+    showStatus('#home-status', `Error: ${err.message}`, 'error');
   }
+}
+$('#account-select').addEventListener('change', e => {
+  selectAccount(Number(e.target.value));
 });
 
 // ═══════════════════════════════════════
@@ -194,9 +212,16 @@ $('#account-select').addEventListener('change', async (e) => {
 // ═══════════════════════════════════════
 async function loadNotebooks() {
   const select = $('#notebook-select');
+  const loadId = ++notebookLoadId;
+  const authuser = currentAuthuser;
+  select.disabled = true;
+  currentNotebookId = null;
+  currentSources = [];
+  sourceLoadId++;
   select.innerHTML = '<option value="">Loading...</option>';
   try {
-    const notebooks = await bg('list-notebooks');
+    const notebooks = await bg('list-notebooks', { authuser });
+    if (loadId !== notebookLoadId) return;
     select.innerHTML = '<option value="">Select notebook...</option>';
     if (Array.isArray(notebooks)) {
       notebooks.forEach(nb => {
@@ -207,29 +232,37 @@ async function loadNotebooks() {
       });
     }
     // Restore last selected
-    const stored = await chrome.storage.local.get(['lastNotebookId']);
-    if (stored.lastNotebookId) {
-      select.value = stored.lastNotebookId;
+    const stored = await chrome.storage.local.get(['lastNotebookByAccount', 'lastNotebookId', 'lastNotebookAuthuser']);
+    if (loadId !== notebookLoadId) return;
+    const notebookId = stored.lastNotebookByAccount?.[authuser] ||
+      ((stored.lastNotebookAuthuser === authuser || (stored.lastNotebookAuthuser === undefined && authuser === 0))
+        ? stored.lastNotebookId : null);
+    if (notebookId) {
+      select.value = notebookId;
       // Verify the option actually exists in the list
-      if (select.value === stored.lastNotebookId) {
-        currentNotebookId = stored.lastNotebookId;
+      if (select.value === notebookId) {
+        currentNotebookId = notebookId;
       } else {
         // Notebook was deleted or belongs to different account
         currentNotebookId = null;
-        await chrome.storage.local.remove(['lastNotebookId']);
+        await bg('set-last-notebook', { notebookId: '', authuser });
       }
     }
   } catch (e) {
+    if (loadId !== notebookLoadId) return;
     select.innerHTML = '<option value="">Error — are you logged in?</option>';
+    showStatus('#home-status', e.message, 'error');
+  } finally {
+    if (loadId === notebookLoadId) select.disabled = false;
   }
 }
 
 $('#notebook-select').addEventListener('change', async (e) => {
   currentNotebookId = e.target.value;
   try {
-    await chrome.storage.local.set({ lastNotebookId: currentNotebookId });
+    await bg('set-last-notebook', { notebookId: currentNotebookId });
   } catch (err) {
-    showStatus('#home-status', `Error: ${escapeHtml(err.message)}`, 'error');
+    showStatus('#home-status', `Error: ${err.message}`, 'error');
   }
 });
 
@@ -239,18 +272,21 @@ $('#refresh-notebooks').addEventListener('click', loadNotebooks);
 $('#create-notebook').addEventListener('click', async () => {
   const title = $('#new-notebook-title').value.trim();
   if (!title) return;
+  const authuser = currentAuthuser;
+  const selectionId = accountSelectionId;
   showStatus('#home-status', 'Creating...', 'info', 0);
   try {
-    const result = await bg('create-notebook', { title });
+    const result = await bg('create-notebook', { title, authuser });
     if (result && result.id) {
       showStatus('#home-status', `Created: ${title}`, 'success');
       $('#new-notebook-title').value = '';
-      loadNotebooks();
+      await bg('set-last-notebook', { notebookId: result.id, authuser });
+      if (selectionId === accountSelectionId) await loadNotebooks();
     } else {
       showStatus('#home-status', 'Could not create notebook', 'error');
     }
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
   }
 });
 
@@ -268,27 +304,49 @@ function requireNotebook() {
 // Add current page
 $('#add-current-page').addEventListener('click', async () => {
   if (!requireNotebook()) return;
+  const notebookId = currentNotebookId;
+  const authuser = currentAuthuser;
   showStatus('#home-status', t('statusAdding'), 'info', 0);
   try {
     const tab = await bg('get-current-tab');
-    await bg('add-source', { notebookId: currentNotebookId, url: tab.url });
-    showStatus('#home-status', `${t('statusAdded')} ${escapeHtml(tab.title || '')}`, 'success');
+    await bg('add-source', { notebookId, authuser, url: UrlUtils.httpUrl(tab.url) });
+    showStatus('#home-status', `${t('statusAdded')} ${tab.title || ''}`, 'success');
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
   }
 });
 
 // Add as PDF
 $('#add-as-pdf').addEventListener('click', async () => {
   if (!requireNotebook()) return;
+  const notebookId = currentNotebookId;
+  const authuser = currentAuthuser;
+  const pending = pendingPdf;
+  const button = $('#add-as-pdf');
+  button.disabled = true;
   showStatus('#home-status', 'Capturing PDF...', 'info', 0);
   try {
-    const tab = await bg('get-current-tab');
-    await bg('add-as-pdf', { notebookId: currentNotebookId, tabId: tab.id, title: tab.title });
-    showStatus('#home-status', `PDF saved: ${escapeHtml(tab.title || '')}`, 'success');
+    const tab = pending ? { id: pending.tabId, title: pending.title } : await bg('get-current-tab');
+    await bg('add-as-pdf', { notebookId, authuser, tabId: tab.id, title: tab.title });
+    if (pending) await chrome.storage.local.remove('pendingPdf');
+    await loadPendingPdf();
+    showStatus('#home-status', `PDF saved: ${tab.title || ''}`, 'success');
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
+  } finally {
+    button.disabled = false;
   }
+});
+
+async function loadPendingPdf() {
+  const data = await chrome.storage.local.get(['pendingPdf']);
+  pendingPdf = data.pendingPdf || null;
+  $('#pending-pdf-info').style.display = pendingPdf ? 'flex' : 'none';
+  $('#pending-pdf-title').textContent = pendingPdf ? t('pendingPdf', { TITLE: pendingPdf.title || pendingPdf.url }) : '';
+}
+$('#cancel-pending-pdf').addEventListener('click', async () => {
+  try { await chrome.storage.local.remove('pendingPdf'); await loadPendingPdf(); }
+  catch (error) { showStatus('#home-status', error.message, 'error'); }
 });
 
 // Add single URL
@@ -298,11 +356,11 @@ $('#add-single-url').addEventListener('click', async () => {
   if (!url) return;
   showStatus('#home-status', t('statusAdding'), 'info', 0);
   try {
-    await bg('add-source', { notebookId: currentNotebookId, url });
+    await bg('add-source', { notebookId: currentNotebookId, url: UrlUtils.httpUrl(url) });
     showStatus('#home-status', t('statusAdded'), 'success');
     $('#single-url').value = '';
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
   }
 });
 
@@ -311,13 +369,21 @@ $('#bulk-add').addEventListener('click', async () => {
   if (!requireNotebook()) return;
   const urls = $('#bulk-urls').value.trim().split('\n').map(u => u.trim()).filter(u => u);
   if (!urls.length) return;
+  const controls = [$('#bulk-add'), $('#bulk-queue'), $('#bulk-urls')];
+  controls.forEach(control => { control.disabled = true; });
+  $('#bulk-results').replaceChildren();
   showStatus('#home-status', `Adding ${urls.length} URLs...`, 'info', 0);
   try {
-    await bg('add-sources', { notebookId: currentNotebookId, urls });
-    showStatus('#home-status', `Added ${urls.length} sources!`, 'success');
-    $('#bulk-urls').value = '';
+    const result = await bg('add-sources', { notebookId: currentNotebookId, urls: urls.map(url => UrlUtils.httpUrl(url)) });
+    $('#bulk-urls').value = ImportResults.retryable(result).map(item => item.url).join('\n');
+    ImportResults.render($('#bulk-results'), result, t);
+    if (result.success) showStatus('#home-status', `Added ${result.count} sources!`, 'success');
+    else showStatus('#home-status', ImportResults.summary(result, t) + '\n' + result.message,
+      result.count ? 'warning' : 'error', 0);
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
+  } finally {
+    controls.forEach(control => { control.disabled = false; });
   }
 });
 
@@ -330,7 +396,7 @@ $('#bulk-queue').addEventListener('click', async () => {
     showStatus('#home-status', `${urls.length} URLs added to queue`, 'success');
     $('#bulk-urls').value = '';
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
   }
 });
 
@@ -339,7 +405,7 @@ $('#import-tabs').addEventListener('click', () => {
   try {
     chrome.tabs.create({ url: chrome.runtime.getURL('app/app.html') });
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
   }
 });
 
@@ -357,7 +423,7 @@ async function checkYouTubeTab() {
     $('#start-parse').disabled = true;
     return;
   }
-  if (tab && tab.url && tab.url.includes('youtube.com/watch')) {
+  if (tab && UrlUtils.videoId(tab.url)) {
     info.style.display = 'block';
     info.innerHTML = `<i class="ms ms-smart_display" style="font-size:14px;vertical-align:middle"></i> ${escapeHtml(tab.title)}`;
     $('#start-parse').disabled = false;
@@ -370,61 +436,63 @@ async function checkYouTubeTab() {
 
 $('#start-parse').addEventListener('click', async () => {
   if (!requireNotebook()) return;
+  const notebookId = currentNotebookId;
+  const authuser = currentAuthuser;
   let tab;
   try {
     tab = await bg('get-current-tab');
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
     return;
   }
-  if (!tab || !tab.url || !tab.url.includes('youtube.com/watch')) return;
+  if (!tab || !UrlUtils.videoId(tab.url)) return;
 
   // Extract video ID
-  const vMatch = tab.url.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
-  if (!vMatch) return;
+  const videoId = UrlUtils.videoId(tab.url);
 
   // Save settings
   try {
     await chrome.storage.local.set({
       commentsMode: $('#comments-mode').value,
-      commentsLimit: parseInt($('#comments-limit').value) || 1000,
+      commentsLimit: $('#comments-limit').value === '' ? 1000 : Math.max(0, Math.min(99999, Number($('#comments-limit').value))),
       commentsIncludeReplies: $('#comments-replies').checked
     });
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
     return;
   }
 
   try {
     const result = await bg('parse-comments', {
-      notebookId: currentNotebookId,
-      videoId: vMatch[1],
+      notebookId, authuser,
+      videoId,
       tabId: tab.id
     });
 
     if (result && result.error) {
-      showStatus('#home-status', `Error: ${escapeHtml(String(result.error))}`, 'error');
+      showStatus('#home-status', `Error: ${String(result.error)}`, 'error');
       return;
     }
 
     // Show progress
+    currentParseId = result.parseId;
     $('#parse-progress').style.display = 'flex';
     $('#start-parse').style.display = 'none';
     startParsePolling();
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
   }
 });
 
 $('#cancel-parse').addEventListener('click', async () => {
   try {
-    await bg('cancel-parse');
+    $('#cancel-parse').disabled = true;
+    const result = await bg('cancel-parse', { parseId: currentParseId });
+    if (result.success === false) $('#cancel-parse').disabled = false;
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
   }
-  stopParsePolling();
-  $('#parse-progress').style.display = 'none';
-  $('#start-parse').style.display = '';
+  // Keep polling until the in-flight request has actually stopped.
 });
 
 function startParsePolling() {
@@ -437,13 +505,15 @@ function startParsePolling() {
       status = await bg('get-parse-status');
     } catch (e) {
       // Background unreachable — keep polling, surface error
-      text.textContent = `Error: ${escapeHtml(e.message)}`;
+      text.textContent = `Error: ${e.message}`;
       return;
     }
     if (!status || !status.progress) return;
+    currentParseId = status.parseId;
 
     if (!status.active && status.progress.phase === 'done') {
       stopParsePolling();
+      $('#cancel-parse').disabled = false;
       fill.style.width = '100%';
       const r = status.result || {};
       const sentParts = r.sentPartCount !== undefined ? r.sentPartCount : r.partCount;
@@ -456,12 +526,13 @@ function startParsePolling() {
       return;
     }
 
-    if (!status.active && (status.progress.phase === 'error' || status.progress.phase === 'cancelled')) {
+    if (!status.active && ['error', 'interrupted', 'cancelled'].includes(status.progress.phase)) {
       stopParsePolling();
+      $('#cancel-parse').disabled = false;
       const errMsg = status.error ? (status.error.message || 'Unknown error') : 'Cancelled';
-      if (status.progress.phase === 'error') {
+      if (status.progress.phase !== 'cancelled') {
         text.innerHTML = `<span style="color:var(--danger,#dc2626)">✗ Error: ${escapeHtml(errMsg)}</span>`;
-        showStatus('#home-status', `✗ Comments not added: ${escapeHtml(errMsg)}`, 'error');
+        showStatus('#home-status', `✗ Comments not added: ${errMsg}`, 'error');
       } else {
         text.textContent = 'Cancelled';
       }
@@ -482,7 +553,8 @@ function startParsePolling() {
       fetching: `Fetching comments... ${fetched}${total ? '/' + total : ''}`,
       fetching_replies: `Fetching replies... ${fetched}`,
       formatting: 'Formatting to Markdown...',
-      sending: 'Sending to Gemini Notebook...'
+      sending: 'Sending to Gemini Notebook...',
+      cancelling: 'Cancelling the current request...'
     };
     text.textContent = phases[status.progress.phase] || status.progress.phase;
   }, 1000);
@@ -501,7 +573,13 @@ async function restoreParseProgress() {
   } catch (_) {
     return;
   }
-  if (!status || !status.active || !status.progress) return;
+  if (!status || !status.progress) return;
+  if (status.progress.phase === 'interrupted') {
+    showStatus('#home-status', status.error?.message || 'Parsing was interrupted. Please start again.', 'error', 0);
+    return;
+  }
+  if (!status.active) return;
+  currentParseId = status.parseId;
   // A parse is in progress — show the progress UI and resume polling
   const progressEl = $('#parse-progress');
   const startBtn = $('#start-parse');
@@ -531,7 +609,7 @@ function wireRssAddSelected(container) {
       showStatus('#home-status', `${items.length} RSS items added to queue`, 'success');
       btn.disabled = false;
     } catch (err) {
-      showStatus('#home-status', `Error: ${escapeHtml(err.message)}`, 'error');
+      showStatus('#home-status', `Error: ${err.message}`, 'error');
       btn.disabled = false;
     }
   });
@@ -563,50 +641,31 @@ function renderRssItems(container, feed) {
   wireRssAddSelected(container);
 }
 
-$('#rss-parse').addEventListener('click', async () => {
-  const url = $('#rss-url').value.trim();
-  if (!url) return;
+async function parseFeedIntoResults(input) {
   const container = $('#rss-results');
-
-  // Validate URL first
-  let origin;
+  let url;
   try {
-    origin = new URL(url).origin + '/*';
-  } catch (_) {
-    container.innerHTML = '<div class="text-muted text-center">Invalid URL</div>';
+    url = UrlUtils.httpUrl(input);
+  } catch (error) {
+    container.textContent = error.message;
     return;
   }
-
-  // chrome.permissions.request() MUST run in the direct user-gesture chain.
-  // Do NOT await anything else before this — check + request permission first.
-  let hasPermission = false;
+  // Request directly in the click handler's gesture chain; an earlier await
+  // (even permissions.contains) can discard Chrome's user-activation token.
   try {
-    hasPermission = await chrome.permissions.contains({ origins: [origin] });
-  } catch (_) {
-    hasPermission = false;
-  }
-
-  if (!hasPermission) {
-    let granted = false;
-    try {
-      granted = await chrome.permissions.request({ origins: [origin] });
-    } catch (_) {
-      granted = false;
-    }
+    const granted = await chrome.permissions.request({ origins: [new URL(url).origin + '/*'] });
     if (!granted) {
-      container.innerHTML = `<div class="text-muted text-center">${escapeHtml(t('rssPermissionNeeded'))}</div>`;
+      container.textContent = t('rssPermissionNeeded');
       return;
     }
-  }
-
-  container.innerHTML = '<div class="text-muted text-center">Parsing...</div>';
-  try {
+    container.textContent = 'Parsing...';
     const feed = await bg('parse-rss', { url });
     renderRssItems(container, feed);
-  } catch (e) {
-    container.innerHTML = `<div class="text-muted text-center">Error: ${escapeHtml(e.message)}</div>`;
+  } catch (error) {
+    container.textContent = 'Error: ' + error.message;
   }
-});
+}
+$('#rss-parse').addEventListener('click', () => parseFeedIntoResults($('#rss-url').value.trim()));
 
 $('#rss-detect').addEventListener('click', async () => {
   const container = $('#rss-results');
@@ -635,22 +694,23 @@ $('#rss-detect').addEventListener('click', async () => {
     return;
   }
 
-  // Render detected feeds as a synthetic feed list with checkboxes + add-to-queue button
+  // A detected feed must be parsed before its article URLs are queued.
   container.innerHTML = `
     <div style="margin-bottom:6px;font-size:12px;color:var(--text-secondary)">${feeds.length} feeds found</div>
     ${feeds.map(f => `
       <div class="result-item">
-        <input type="checkbox" class="rss-cb" data-url="${escapeHtml(f.url || '')}" data-title="${escapeHtml(f.title || '')}" checked>
         <i class="ms ms-rss_feed" style="font-size:14px;color:var(--accent)"></i>
         <span class="title">${escapeHtml(f.title || '')}</span>
-        <span class="url">${escapeHtml(f.url || '')}</span>
+        <button class="btn btn-sm rss-load-feed" data-url="${escapeHtml(f.url || '')}">${escapeHtml(t('rssParse'))}</button>
       </div>
     `).join('')}
-    <button class="btn btn-primary btn-full mt-8" id="rss-add-selected">
-      <i class="ms ms-add"></i> ${escapeHtml(t('addToQueue'))}
-    </button>
   `;
-  wireRssAddSelected(container);
+  container.querySelectorAll('.rss-load-feed').forEach(button => {
+    button.addEventListener('click', () => {
+      $('#rss-url').value = button.dataset.url;
+      parseFeedIntoResults(button.dataset.url);
+    });
+  });
 });
 
 // ═══════════════════════════════════════
@@ -708,7 +768,7 @@ $('#yt-extract').addEventListener('click', async () => {
         btn.disabled = false;
       }
     } catch (err) {
-      showStatus('#home-status', `Error: ${escapeHtml(err.message)}`, 'error');
+      showStatus('#home-status', `Error: ${err.message}`, 'error');
       btn.disabled = false;
     }
   });
@@ -742,14 +802,13 @@ $('#extract-links').addEventListener('click', async () => {
 
   container.innerHTML = `
     <div style="margin-bottom:6px;font-size:12px;color:var(--text-secondary)">${links.length} links found</div>
-    ${links.slice(0, 50).map(l => `
+    ${links.map(l => `
       <div class="result-item">
         <input type="checkbox" class="link-cb" data-url="${escapeHtml(l.url || '')}">
         <i class="ms ms-link" style="font-size:14px"></i>
         <span class="title">${escapeHtml(l.title || '')}</span>
       </div>
     `).join('')}
-    ${links.length > 50 ? `<div class="text-muted text-center">...and ${links.length - 50} more</div>` : ''}
     <button class="btn btn-primary btn-full mt-8" id="links-add-selected">
       <i class="ms ms-add"></i> ${escapeHtml(t('addToQueue'))}
     </button>
@@ -767,7 +826,7 @@ $('#extract-links').addEventListener('click', async () => {
         btn.disabled = false;
       }
     } catch (err) {
-      showStatus('#home-status', `Error: ${escapeHtml(err.message)}`, 'error');
+      showStatus('#home-status', `Error: ${err.message}`, 'error');
       btn.disabled = false;
     }
   });
@@ -776,62 +835,74 @@ $('#extract-links').addEventListener('click', async () => {
 // ═══════════════════════════════════════
 // QUEUE
 // ═══════════════════════════════════════
+let queueLoadId = 0;
 async function loadQueue() {
+  const loadId = ++queueLoadId;
   const list = $('#queue-list');
-  const count = $('#queue-count');
-  let queue;
-  try {
-    queue = await bg('get-queue');
-  } catch (e) {
-    count.textContent = '0';
-    list.innerHTML = `<div class="text-muted text-center" style="padding:16px">Error: ${escapeHtml(e.message)}</div>`;
+  let state;
+  try { state = await bg('get-queue-status'); } catch (error) {
+    showStatus('#queue-status', error.message, 'error');
     return;
   }
-  if (!Array.isArray(queue)) queue = [];
-  count.textContent = queue.length;
-
-  if (!queue.length) {
-    list.innerHTML = '<div class="text-muted text-center" style="padding:16px">Queue is empty</div>';
-    return;
+  if (loadId !== queueLoadId) return;
+  const queue = state.queue || [];
+  $('#queue-count').textContent = queue.length;
+  $('#process-queue').disabled = state.active || !state.pending;
+  $('#retry-failed').style.display = state.failed ? '' : 'none';
+  $('#retry-failed').disabled = state.active;
+  if (state.active) {
+    showStatus('#queue-status', t('queueRunning', { COUNT: state.processed, TOTAL: state.total, ERRORS: state.errors }), 'info', 0);
+  } else if (state.pending) {
+    showStatus('#queue-status', t('queueReady', { COUNT: state.pending }), 'info', 0);
+  } else if (state.status === 'completed') {
+    showStatus('#queue-status', t('queueDone', { COUNT: state.processed, ERRORS: state.errors }), state.errors ? 'warning' : 'success', 0);
+  } else if (state.status === 'cancelled') {
+    showStatus('#queue-status', t('queueCancelled'), 'info', 0);
   }
-
-  list.innerHTML = queue.map((item, i) => `
-    <div class="queue-item" data-idx="${i}">
+  list.innerHTML = queue.length ? queue.map(item => `
+    <div class="queue-item" data-id="${escapeHtml(item.id)}">
       <i class="ms ms-link" style="font-size:14px;color:var(--accent)"></i>
-      <span class="title" title="${escapeHtml(item.url || '')}">${escapeHtml(item.title || item.url || '')}</span>
-      <button class="remove" data-idx="${i}" title="Remove">&times;</button>
+      <div class="queue-item-details">
+        <span class="title" title="${escapeHtml(item.url || '')}">${escapeHtml(item.title || item.url || '')}</span>
+        <small class="queue-item-state ${item.status === 'failed' ? 'failed' : ''}">${escapeHtml(t(
+          item.status === 'failed' ? 'queueFailedItem' : item.status === 'processing' ? 'queueProcessingItem' : 'queuePendingItem'))}
+          ${item.lastError ? ': ' + escapeHtml(item.lastError) : ''}</small>
+      </div>
+      <button class="remove" data-id="${escapeHtml(item.id)}" title="Remove" ${item.status === 'processing' ? 'disabled' : ''}>&times;</button>
     </div>
-  `).join('');
-
-  // Remove individual items via background (atomic; avoids stale-closure
-  // direct-write race that previously could lose items added concurrently).
-  list.querySelectorAll('.remove').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const idx = parseInt(btn.dataset.idx);
-      if (Number.isNaN(idx)) return;
+  `).join('') : '<div class="text-muted text-center" style="padding:16px">Queue is empty</div>';
+  list.querySelectorAll('.remove').forEach(button => {
+    button.addEventListener('click', async () => {
       try {
-        await bg('remove-from-queue', { index: idx });
-        // Re-render from the authoritative queue stored in background
-        loadQueue();
-      } catch (e) {
-        showStatus('#queue-status', `Error: ${escapeHtml(e.message)}`, 'error');
-      }
+        await bg('remove-from-queue', { id: button.dataset.id });
+        await loadQueue();
+      } catch (error) { showStatus('#queue-status', error.message, 'error'); }
     });
   });
 }
 
 $('#process-queue').addEventListener('click', async () => {
   if (!requireNotebook()) return;
+  $('#process-queue').disabled = true;
   showStatus('#queue-status', 'Processing queue...', 'info', 0);
   try {
-    const result = await bg('process-queue', { notebookId: currentNotebookId });
-    const processed = (result && typeof result.processed === 'number') ? result.processed : 0;
-    const errors = (result && typeof result.errors === 'number') ? result.errors : 0;
-    showStatus('#queue-status', `Done! ${processed} added, ${errors} errors`, errors ? 'warning' : 'success');
-    loadQueue();
+    await bg('process-queue', { notebookId: currentNotebookId });
+    await loadQueue();
   } catch (e) {
-    showStatus('#queue-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    $('#cancel-parse').disabled = false;
+    $('#process-queue').disabled = false;
+    showStatus('#queue-status', `Error: ${e.message}`, 'error');
   }
+});
+
+$('#retry-failed').addEventListener('click', async () => {
+  try { await bg('retry-failed'); await loadQueue(); }
+  catch (error) { showStatus('#queue-status', error.message, 'error'); }
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && (changes.queue || changes.queueRun) && $('#panel-queue').classList.contains('active')) loadQueue();
+  if (area === 'local' && changes.pendingPdf) loadPendingPdf();
 });
 
 $('#clear-queue').addEventListener('click', async () => {
@@ -840,7 +911,7 @@ $('#clear-queue').addEventListener('click', async () => {
     await bg('clear-queue');
     loadQueue();
   } catch (e) {
-    showStatus('#queue-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#queue-status', `Error: ${e.message}`, 'error');
   }
 });
 
@@ -856,12 +927,17 @@ async function loadSources() {
   }
 
   $('#sources-list').innerHTML = '<div class="text-muted text-center" style="padding:16px">Loading sources...</div>';
+  const loadId = ++sourceLoadId;
+  const notebookId = currentNotebookId;
+  const authuser = currentAuthuser;
 
   try {
-    const nb = await bg('get-notebook', { notebookId: currentNotebookId });
+    const nb = await bg('get-notebook', { notebookId, authuser });
+    if (loadId !== sourceLoadId || notebookId !== currentNotebookId) return;
     currentSources = nb.sources || [];
     renderSources();
   } catch (e) {
+    if (loadId !== sourceLoadId) return;
     $('#sources-list').innerHTML = `<div class="text-muted text-center" style="padding:16px">Error: ${escapeHtml(e.message)}</div>`;
   }
 }
@@ -869,6 +945,8 @@ async function loadSources() {
 function renderSources() {
   const list = $('#sources-list');
   if (!currentSources.length) {
+    $('#delete-selected').style.display = 'none';
+    $('#del-count').textContent = '0';
     list.innerHTML = '<div class="text-muted text-center" style="padding:16px">No sources in this notebook</div>';
     return;
   }
@@ -877,7 +955,7 @@ function renderSources() {
     <div class="source-item" data-source-id="${escapeHtml(s.id || '')}">
       <input type="checkbox" class="source-cb" data-id="${escapeHtml(s.id || '')}">
       <i class="ms ${sourceIcons[s.type] || 'ms-help_outline'}"></i>
-      <span class="title" title="${escapeHtml(s.url || '')}">${escapeHtml(s.title || '')}</span>
+      <span class="title" title="${escapeHtml((s.url || '') + '\nID: ' + s.id)}">${escapeHtml(s.title || '')}</span>
       <span class="type">${escapeHtml(s.type || '')}</span>
       ${s.canSync ? '<i class="ms ms-cloud_sync sync-badge" title="Drive source"></i>' : ''}
     </div>
@@ -887,6 +965,7 @@ function renderSources() {
   list.querySelectorAll('.source-cb').forEach(cb => {
     cb.addEventListener('change', updateDeleteCount);
   });
+  updateDeleteCount();
 }
 
 function updateDeleteCount() {
@@ -917,7 +996,7 @@ $('#delete-selected').addEventListener('click', async () => {
     showStatus('#organize-status', `Deleted ${ids.length} sources`, 'success');
     loadSources();
   } catch (e) {
-    showStatus('#organize-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#organize-status', `Error: ${e.message}`, 'error');
   }
 });
 
@@ -927,9 +1006,9 @@ $('#sync-drive').addEventListener('click', async () => {
   try {
     const result = await bg('sync-drive-sources', { notebookId: currentNotebookId });
     const r = (result && result.results) || {};
-    showStatus('#organize-status', `Sync: ${r.synced || 0} updated, ${r.fresh || 0} up-to-date, ${r.skipped || 0} skipped`, 'success');
+    showStatus('#organize-status', `Sync: ${r.synced || 0} updated, ${r.fresh || 0} up-to-date, ${r.skipped || 0} skipped, ${r.errors || 0} errors`, r.errors ? 'warning' : 'success');
   } catch (e) {
-    showStatus('#organize-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#organize-status', `Error: ${e.message}`, 'error');
   }
 });
 
@@ -972,12 +1051,16 @@ function renderHistory(history) {
       add_source: 'ms-add_link',
       add_text: 'ms-edit_note',
       add_pdf: 'ms-picture_as_pdf',
+      add_youtube_comments: 'ms-smart_display',
+      create_notebook: 'ms-auto_stories',
+      sync_drive: 'ms-cloud_sync',
       delete_source: 'ms-delete',
       delete_sources: 'ms-delete_sweep',
       error: 'ms-error'
     };
     const iconCls = iconMap[h.action] || 'ms-info';
-    const detail = h.url || h.title || `${h.count || 1} sources`;
+    const detail = h.action === 'error' ? `${h.url || h.title || ''}: ${h.error || ''}`
+      : h.url || h.title || `${h.count ?? 1} sources`;
     return `
       <div class="history-item">
         <i class="ms ${iconCls}"></i>
@@ -1006,6 +1089,7 @@ $('#history-search').addEventListener('input', (e) => {
     const filtered = q ? history.filter(h =>
       (h.url || '').toLowerCase().includes(q) ||
       (h.title || '').toLowerCase().includes(q) ||
+      (h.error || '').toLowerCase().includes(q) ||
       (h.action || '').toLowerCase().includes(q)
     ) : history;
     renderHistory(filtered);
@@ -1018,7 +1102,7 @@ $('#clear-history').addEventListener('click', async () => {
     await bg('clear-history');
     loadHistory();
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
   }
 });
 
@@ -1028,19 +1112,22 @@ $('#clear-history').addEventListener('click', async () => {
 async function loadSettings() {
   let sync, local;
   try {
-    sync = await chrome.storage.sync.get(['theme', 'language', 'enableBulkDelete', 'enableSyncDrive', 'enableNotifications']);
-    local = await chrome.storage.local.get(['addDelay']);
+    sync = await chrome.storage.sync.get(['theme', 'language', 'enableBulkDelete', 'enableSyncDrive', 'enableNotifications', 'settingsNotifications']);
+    local = await chrome.storage.local.get(['addDelay', 'commentsMode', 'commentsLimit', 'commentsIncludeReplies']);
   } catch (e) {
-    showStatus('#home-status', `Error loading settings: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error loading settings: ${e.message}`, 'error');
     return;
   }
 
   $('#settings-theme').value = sync.theme || 'light';
-  $('#settings-lang').value = sync.language || 'en';
+  $('#settings-lang').value = sync.language || (typeof I18n !== 'undefined' ? I18n.getLanguage() : 'en');
   $('#settings-delay').value = local.addDelay || 2000;
   $('#settings-bulk-delete').checked = sync.enableBulkDelete !== false;
   $('#settings-sync-drive').checked = sync.enableSyncDrive !== false;
-  $('#settings-notifications').checked = sync.enableNotifications !== false;
+  $('#settings-notifications').checked = (sync.enableNotifications ?? sync.settingsNotifications) !== false;
+  $('#comments-mode').value = ['new', 'newest'].includes(local.commentsMode) ? 'newest' : 'top';
+  $('#comments-limit').value = local.commentsLimit ?? 1000;
+  $('#comments-replies').checked = local.commentsIncludeReplies !== false;
 }
 
 // Auto-save all settings on change
@@ -1058,10 +1145,10 @@ async function saveSettings() {
       enableNotifications: $('#settings-notifications').checked
     });
     await chrome.storage.local.set({
-      addDelay: parseInt($('#settings-delay').value) || 2000
+      addDelay: Math.min(30000, Math.max(500, Number($('#settings-delay').value) || 2000))
     });
   } catch (e) {
-    showStatus('#home-status', `Error saving settings: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error saving settings: ${e.message}`, 'error');
     return;
   }
 
@@ -1078,7 +1165,7 @@ $('#backup-settings').addEventListener('click', async () => {
   try {
     const sync = await chrome.storage.sync.get(null);
     const local = await chrome.storage.local.get(null);
-    const backup = { sync, local, version: '3.1.0', date: new Date().toISOString() };
+    const backup = { ...SettingsBackup.normalize({ sync, local }), version: chrome.runtime.getManifest().version, date: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1088,7 +1175,7 @@ $('#backup-settings').addEventListener('click', async () => {
     URL.revokeObjectURL(url);
     showStatus('#home-status', 'Backup downloaded', 'success');
   } catch (e) {
-    showStatus('#home-status', `Error: ${escapeHtml(e.message)}`, 'error');
+    showStatus('#home-status', `Error: ${e.message}`, 'error');
   }
 });
 
@@ -1096,25 +1183,6 @@ $('#backup-settings').addEventListener('click', async () => {
 $('#restore-settings').addEventListener('click', () => {
   $('#restore-file').click();
 });
-
-// Allowed keys for each storage area (defense-in-depth against crafted backups)
-const ALLOWED_SYNC_KEYS = new Set([
-  'theme', 'language', 'addDelay', 'enableBulkDelete', 'enableSyncDrive',
-  'settingsNotifications', 'activeAccount'
-]);
-const ALLOWED_LOCAL_KEYS = new Set([
-  'queue', 'history', 'commentsMode', 'commentsLimit', 'commentsReplies',
-  'toolbarPosition', 'toolbarCollapsed', 'toolbarHidden'
-]);
-
-function filterAllowedKeys(obj, allowed) {
-  const out = {};
-  if (!obj || typeof obj !== 'object') return out;
-  for (const k of Object.keys(obj)) {
-    if (allowed.has(k)) out[k] = obj[k];
-  }
-  return out;
-}
 
 $('#restore-file').addEventListener('change', async (e) => {
   const file = e.target.files[0];
@@ -1127,12 +1195,13 @@ $('#restore-file').addEventListener('change', async (e) => {
     const text = await file.text();
     backup = JSON.parse(text);
   } catch (err) {
-    showStatus('#home-status', `Invalid backup file: ${escapeHtml(err.message)}`, 'error');
+    showStatus('#home-status', `Invalid backup file: ${err.message}`, 'error');
     return;
   }
 
-  if (!backup || typeof backup !== 'object' || Array.isArray(backup)) {
-    showStatus('#home-status', 'Invalid backup file: expected an object', 'error');
+  let payload;
+  try { payload = SettingsBackup.normalize(backup); } catch (error) {
+    showStatus('#home-status', 'Invalid backup file: ' + error.message, 'error');
     return;
   }
 
@@ -1141,22 +1210,24 @@ $('#restore-file').addEventListener('change', async (e) => {
     return;
   }
 
-  // Schema-validate: only allow known keys; reject anything else silently
-  const syncPayload = filterAllowedKeys(backup.sync, ALLOWED_SYNC_KEYS);
-  const localPayload = filterAllowedKeys(backup.local, ALLOWED_LOCAL_KEYS);
+  const syncPayload = payload.sync;
+  const localPayload = payload.local;
 
   try {
     if (Object.keys(syncPayload).length) {
       await chrome.storage.sync.set(syncPayload);
     }
     if (Object.keys(localPayload).length) {
+      if (localPayload.queue) await bg('clear-queue');
       await chrome.storage.local.set(localPayload);
     }
     await loadSettings();
     await initTheme();
+    await initI18n();
+    await loadAccounts();
     showStatus('#home-status', 'Settings restored!', 'success');
   } catch (err) {
-    showStatus('#home-status', `Restore failed: ${escapeHtml(err.message)}`, 'error');
+    showStatus('#home-status', `Restore failed: ${err.message}`, 'error');
   }
 });
 
@@ -1179,6 +1250,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   } catch (e) {
     console.error('loadSettings failed:', e);
   }
+  try { await loadPendingPdf(); } catch (error) { console.error('Pending PDF:', error); }
   try {
     await loadAccounts();
   } catch (e) {
